@@ -4,161 +4,203 @@ import numpy as np
 import math
 
 # --- CONFIGURATION DE LA PAGE ---
-st.set_page_config(layout="wide", page_title="Calculateur Bassin Retention")
+st.set_page_config(layout="wide", page_title="Calculateur Bassin & Fouille")
 
-# --- FONCTIONS DE CALCUL ---
-def calculate_geometry(W, L, Depth, angle_deg):
-    """Calcul les coordonnées des sommets du bassin."""
-    
-    # 1. Calcul du recul (Offset) basé sur la pente
-    # Si 90°, mur vertical, offset = 0
+# --- FONCTIONS GEOMETRIQUES ---
+
+def get_offset(depth, angle_deg):
+    """Calcule le recul horizontal (offset) selon la pente."""
     if angle_deg >= 89.9:
-        offset = 0.0
-    else:
-        # Conversion radians
-        angle_safe = max(0.1, angle_deg) 
-        angle_rad = math.radians(angle_safe)
-        offset = Depth / math.tan(angle_rad)
+        return 0.0
+    angle_safe = max(0.1, angle_deg)
+    return depth / math.tan(math.radians(angle_safe))
+
+def calc_triangle(W, L, Depth, offset, angle_deg):
+    """Logique pour le bassin triangulaire (existante)."""
+    # Sommets HAUT
+    top = [
+        np.array([0, 0, 0]),
+        np.array([W, 0, 0]),
+        np.array([0, L, 0])
+    ]
     
-    # --- Sommets du HAUT (Grande Base) ---
-    p_top_origin = np.array([0, 0, 0])
-    p_top_x = np.array([W, 0, 0])
-    p_top_y = np.array([0, L, 0])
-    
-    # --- Sommets du BAS (Petite Base) ---
-    # Origine du fond (décalée de 'offset' en X et Y)
+    # Sommets BAS
+    # 1. Origine décalée
     p_bot_origin = np.array([offset, offset, -Depth])
     
-    # Calcul de la ligne oblique (Hypoténuse du fond)
-    # Equation de base : L*x + W*y = W*L
-    # On décale cette ligne vers l'intérieur de la distance 'offset'
+    # 2. Calcul intersections hypoténuse
     hyp_len = math.sqrt(W**2 + L**2)
     c_orig = W * L
     c_new = c_orig - offset * hyp_len
     
-    # --- VALIDATION STRICTE ---
     is_valid = True
-    x_bot = 0
-    y_bot = 0
     
-    # Condition 1 : L'offset ne doit pas être plus grand que les côtés du mur
+    # Vérification géométrique
     if offset >= W or offset >= L:
         is_valid = False
-    
-    # Condition 2 : Calcul des intersections
+    elif c_new <= 0:
+        is_valid = False
     else:
-        # Intersection sur l'axe X (à hauteur y = offset)
-        # L*x + W*offset = c_new
+        # Intersection X et Y
         x_bot = (c_new - W * offset) / L
-        
-        # Intersection sur l'axe Y (à largeur x = offset)
-        # L*offset + W*y = c_new
         y_bot = (c_new - L * offset) / W
         
-        # Condition 3 (CRITIQUE) : Inversion du fond
-        # Si x_bot est plus petit que l'offset, c'est que le triangle s'est retourné
+        # Vérification croisement
         if x_bot <= offset or y_bot <= offset:
             is_valid = False
 
-    # Si invalide, on renvoie des valeurs bidons pour ne pas faire planter Python, 
-    # mais on signale l'erreur via "is_valid"
+    # Construction points bas
     if not is_valid:
-        # On crée un tout petit triangle au centre juste pour la forme des variables
-        center_x, center_y = W/2, L/2
-        p_bot_origin = np.array([center_x, center_y, -Depth])
-        p_bot_x = np.array([center_x+0.01, center_y, -Depth])
-        p_bot_y = np.array([center_x, center_y+0.01, -Depth])
+        # Points bidons pour éviter crash avant le stop()
+        bot = [p_bot_origin, p_bot_origin, p_bot_origin]
     else:
-        # Cas Valide
         if angle_deg >= 89.9:
-            # Vertical
-            p_bot_x = np.array([W, 0, -Depth])
-            p_bot_y = np.array([0, L, -Depth])
+            bot = [
+                np.array([offset, offset, -Depth]), # 0,0
+                np.array([W, 0, -Depth]),
+                np.array([0, L, -Depth])
+            ]
         else:
-            # Normal
-            p_bot_x = np.array([x_bot, offset, -Depth])
-            p_bot_y = np.array([offset, y_bot, -Depth])
+            bot = [
+                p_bot_origin,
+                np.array([x_bot, offset, -Depth]),
+                np.array([offset, y_bot, -Depth])
+            ]
+            
+    return {"top": top, "bot": bot, "is_valid": is_valid, "type": "triangle"}
+
+def calc_rectangle(W, L, Depth, offset, angle_deg):
+    """Logique pour le bassin rectangulaire (nouvelle)."""
+    # Sommets HAUT (Sens horaire ou anti-horaire, important pour le mesh)
+    # 0:0,0 | 1:W,0 | 2:W,L | 3:0,L
+    top = [
+        np.array([0, 0, 0]),
+        np.array([W, 0, 0]),
+        np.array([W, L, 0]),
+        np.array([0, L, 0])
+    ]
+    
+    # Validation
+    # Pour un rectangle, il faut que Largeur > 2 * offset et Longueur > 2 * offset
+    # Sinon les pentes se croisent au milieu
+    is_valid = True
+    if (2 * offset) >= W or (2 * offset) >= L:
+        is_valid = False
+    
+    # Sommets BAS
+    if not is_valid:
+        bot = [np.array([W/2, L/2, -Depth])] * 4
+    else:
+        # On rentre de 'offset' de chaque côté
+        x_min, x_max = offset, W - offset
+        y_min, y_max = offset, L - offset
         
-    return {
-        "top": [p_top_origin, p_top_x, p_top_y],
-        "bot": [p_bot_origin, p_bot_x, p_bot_y],
-        "is_valid": is_valid,
-        "offset": offset
-    }
+        bot = [
+            np.array([x_min, y_min, -Depth]),
+            np.array([x_max, y_min, -Depth]),
+            np.array([x_max, y_max, -Depth]),
+            np.array([x_min, y_max, -Depth])
+        ]
+        
+    return {"top": top, "bot": bot, "is_valid": is_valid, "type": "rectangle"}
 
 def calculate_volume(geom, depth):
-    # Formule du Prismatoïde
-    t = geom["top"]
-    w_top = t[1][0]
-    l_top = t[2][1]
-    area_top = 0.5 * w_top * l_top
-    
-    b = geom["bot"]
-    # On s'assure que les distances sont positives
-    w_bot = max(0, b[1][0] - b[0][0]) 
-    l_bot = max(0, b[2][1] - b[0][1])
-    area_bot = 0.5 * w_bot * l_bot
-    
+    """Calcule Volume et Surfaces (Prismatoïde généralisé)."""
+    # Surface Top
+    if geom["type"] == "triangle":
+        # Aire Triangle Rectangle = (B*H)/2
+        w_top = geom["top"][1][0]
+        l_top = geom["top"][2][1]
+        area_top = 0.5 * w_top * l_top
+        
+        # Surface Bot
+        b = geom["bot"]
+        w_bot = max(0, b[1][0] - b[0][0])
+        l_bot = max(0, b[2][1] - b[0][1])
+        area_bot = 0.5 * w_bot * l_bot
+        
+    else: # Rectangle
+        # Aire Rectangle = L*l
+        w_top = geom["top"][1][0] # W
+        l_top = geom["top"][3][1] # L
+        area_top = w_top * l_top
+        
+        b = geom["bot"]
+        w_bot = max(0, b[1][0] - b[0][0])
+        l_bot = max(0, b[3][1] - b[0][1])
+        area_bot = w_bot * l_bot
+
+    # Surface Mid (Moyenne des dimensions linéaires au carré pour l'aire)
     w_mid = (w_top + w_bot) / 2
     l_mid = (l_top + l_bot) / 2
-    area_mid = 0.5 * w_mid * l_mid
+    
+    if geom["type"] == "triangle":
+        area_mid = 0.5 * w_mid * l_mid
+    else:
+        area_mid = w_mid * l_mid
     
     vol = (depth / 6) * (area_top + area_bot + 4 * area_mid)
+    
     return vol, area_top, area_bot
 
 # --- INTERFACE ---
 
-st.title("🚜 Calculateur de Bassin")
-st.markdown("Outil de dimensionnement - Triangle rectangle tronqué")
+st.title("🚜 Calculateur de Fouille")
+st.markdown("Dimensionnement de bassin ou trou avec pentes.")
 
-# 1. PARAMETRES
+# 1. SIDEBAR
 with st.sidebar:
-    st.header("Entrées")
+    st.header("1. Forme")
+    shape_type = st.radio("Type de base :", ["Triangle Rectangle", "Rectangle"], index=0)
     
-    # Dimensions
-    val_W = st.number_input("Largeur X (Mur 1)", value=10.0, step=0.5, min_value=1.0)
-    val_L = st.number_input("Longueur Y (Mur 2)", value=8.0, step=0.5, min_value=1.0)
+    st.header("2. Dimensions")
+    val_W = st.number_input("Largeur X (m)", value=10.0, step=0.5, min_value=1.0)
+    val_L = st.number_input("Longueur Y (m)", value=8.0, step=0.5, min_value=1.0)
     
-    st.markdown("---")
-    
-    # Paramètres de creusement
-    val_D = st.number_input("Profondeur (m)", value=2.0, step=0.1, min_value=0.1)
+    st.header("3. Creusement")
+    val_D = st.number_input("Profondeur Z (m)", value=2.0, step=0.1, min_value=0.1)
     val_Angle = st.slider("Angle Pente (°)", min_value=1, max_value=90, value=45)
-
     
+    # Calcul préliminaire de l'offset
+    offset = get_offset(val_D, val_Angle)
+    st.caption(f"Recul horizontal requis : {offset:.2f} m")
 
-# 2. CALCUL GEOMETRIE
-geom = calculate_geometry(val_W, val_L, val_D, val_Angle)
+# 2. LOGIQUE PRINCIPALE
+if shape_type == "Triangle Rectangle":
+    geom = calc_triangle(val_W, val_L, val_D, offset, val_Angle)
+else:
+    geom = calc_rectangle(val_W, val_L, val_D, offset, val_Angle)
 
-# 3. VERIFICATION ERREUR
+# 3. GESTION ERREUR
 if not geom["is_valid"]:
-    st.error("🛑 **STOP : CONFIGURATION IMPOSSIBLE**")
+    st.error("🛑 **CONFIGURATION IMPOSSIBLE**")
     st.markdown(f"""
-    Le trou est **trop profond** pour la surface disponible avec cette pente.
+    Les pentes sont trop douces pour la profondeur demandée. 
+    Les parois se croisent et le fond n'existe plus.
     
-    Les parois se rejoignent avant d'atteindre **{val_D}m** de profondeur.
+    **Recul nécessaire :** {offset:.2f}m de chaque côté.
     
-    **Solutions :**
-    1. Augmentez l'angle (raidir la pente).
-    2. Réduisez la profondeur.
-    3. Agrandissez la surface de départ.
+    **Solution :**
+    *   Augmentez l'angle (raidir la pente).
+    *   Ou réduisez la profondeur.
+    *   Ou augmentez la taille du bassin.
     """)
-    st.stop() # Arrête l'exécution ici, n'affiche pas le reste
+    st.stop()
 
-# 4. CALCUL VOLUME (Si valide)
+# 4. RESULTATS
 vol, a_top, a_bot = calculate_volume(geom, val_D)
 
-# 5. RESULTATS KPIs
-kpi1, kpi2, kpi3, kpi4 = st.columns(4)
-kpi1.metric("Volume Déblai", f"{vol:.2f} m³", help="Volume total de terre à évacuer")
-kpi2.metric("Surface Fond", f"{a_bot:.2f} m²", help="Surface plate au fond du trou")
-kpi3.metric("Surface Haut", f"{a_top:.2f} m²", help="Emprise au sol totale")
-kpi4.metric("Recul Pente", f"{geom['offset']:.2f} m", help="Distance horizontale prise par la pente")
+k1, k2, k3, k4 = st.columns(4)
+k1.metric("Volume Déblai", f"{vol:.2f} m³")
+k2.metric("Surface Fond", f"{a_bot:.2f} m²")
+k3.metric("Surface Haut", f"{a_top:.2f} m²")
+k4.metric("Recul Pente", f"{offset:.2f} m")
 
-# 6. VISUALISATION
+# 5. VISUALISATION
 tab1, tab2 = st.tabs(["Vue 3D", "Plan 2D"])
 
 with tab1:
+    # Construction du Mesh
     verts = geom["top"] + geom["bot"]
     x = [v[0] for v in verts]
     y = [v[1] for v in verts]
@@ -167,6 +209,7 @@ with tab1:
     fig_3d = go.Figure(data=[
         go.Mesh3d(
             x=x, y=y, z=z,
+            # alphahull=0 calcule automatiquement l'enveloppe convexe (parfait pour ces formes)
             alphahull=0, 
             opacity=0.6,
             color='#00a8ff',
@@ -175,65 +218,92 @@ with tab1:
         )
     ])
     
-    # Arêtes
-    def add_edge(fig, p1, p2, col="black"):
+    # Fonction helper pour tracer les lignes
+    def add_line(fig, p1, p2, color="black"):
         fig.add_trace(go.Scatter3d(
             x=[p1[0], p2[0]], y=[p1[1], p2[1]], z=[p1[2], p2[2]],
-            mode='lines', line=dict(color=col, width=4), showlegend=False
+            mode='lines', line=dict(color=color, width=4), showlegend=False
         ))
 
-    # Top (Bleu)
-    add_edge(fig_3d, geom["top"][0], geom["top"][1], "blue")
-    add_edge(fig_3d, geom["top"][1], geom["top"][2], "blue")
-    add_edge(fig_3d, geom["top"][2], geom["top"][0], "blue")
+    # Tracer les arêtes (adaptatif selon le nombre de points)
+    n_points = len(geom["top"]) # 3 pour triangle, 4 pour rectangle
     
-    # Bot (Rouge)
-    add_edge(fig_3d, geom["bot"][0], geom["bot"][1], "red")
-    add_edge(fig_3d, geom["bot"][1], geom["bot"][2], "red")
-    add_edge(fig_3d, geom["bot"][2], geom["bot"][0], "red")
-    
-    # Verticales (Noir)
-    add_edge(fig_3d, geom["top"][0], geom["bot"][0])
-    add_edge(fig_3d, geom["top"][1], geom["bot"][1])
-    add_edge(fig_3d, geom["top"][2], geom["bot"][2])
+    # Boucle pour tracer le tour du Haut et du Bas
+    for i in range(n_points):
+        # Point actuel et point suivant (modulo pour boucler)
+        next_i = (i + 1) % n_points
+        
+        # Ligne Haut (Bleu)
+        add_line(fig_3d, geom["top"][i], geom["top"][next_i], "blue")
+        # Ligne Bas (Rouge)
+        add_line(fig_3d, geom["bot"][i], geom["bot"][next_i], "red")
+        # Ligne Verticale/Pente (Noir)
+        add_line(fig_3d, geom["top"][i], geom["bot"][i], "black")
 
     fig_3d.update_layout(scene=dict(aspectmode='data'), height=600, margin=dict(l=0, r=0, b=0, t=0))
     st.plotly_chart(fig_3d, use_container_width=True)
 
 with tab2:
     fig_2d = go.Figure()
+    
+    # Extraction coord X, Y pour plot 2D
+    # On ajoute le premier point à la fin pour fermer la boucle
+    t_x = [v[0] for v in geom["top"]] + [geom["top"][0][0]]
+    t_y = [v[1] for v in geom["top"]] + [geom["top"][0][1]]
+    
+    b_x = [v[0] for v in geom["bot"]] + [geom["bot"][0][0]]
+    b_y = [v[1] for v in geom["bot"]] + [geom["bot"][0][1]]
 
-    # Haut
-    t = geom["top"]
+    # Dessin Haut
     fig_2d.add_trace(go.Scatter(
-        x=[t[0][0], t[1][0], t[2][0], t[0][0]],
-        y=[t[0][1], t[1][1], t[2][1], t[0][1]],
+        x=t_x, y=t_y,
         fill='toself', fillcolor='rgba(0,0,255,0.1)',
         line=dict(color='blue'), name='Ouverture'
     ))
     
-    # Bas
-    b = geom["bot"]
+    # Dessin Bas
     fig_2d.add_trace(go.Scatter(
-        x=[b[0][0], b[1][0], b[2][0], b[0][0]],
-        y=[b[0][1], b[1][1], b[2][1], b[0][1]],
+        x=b_x, y=b_y,
         fill='toself', fillcolor='rgba(255,0,0,0.2)',
         line=dict(color='red', dash='dash'), name='Fond'
     ))
 
-    # Cotes
-    if geom['offset'] > 0.05:
-        fig_2d.add_annotation(x=geom['offset']/2, y=geom['offset']/2, text=f"Recul: {geom['offset']:.2f}", font=dict(color="green", size=10), showarrow=False)
-
-    dist_x_bot = b[1][0] - b[0][0]
-    dist_y_bot = b[2][1] - b[0][1]
+    # Cotes intelligentes
+    # On prend toujours le côté sur l'axe X et l'axe Y pour afficher les cotes
     
-    # Fleches cotes fond
-    fig_2d.add_annotation(x=b[0][0] + dist_x_bot/2, y=b[0][1], text=f"L_fond: {dist_x_bot:.2f}m", showarrow=True, ay=25)
-    fig_2d.add_annotation(x=b[0][0], y=b[0][1] + dist_y_bot/2, text=f"l_fond: {dist_y_bot:.2f}m", showarrow=True, ax=-40)
+    # Largeur Fond
+    w_bot_val = geom["bot"][1][0] - geom["bot"][0][0]
+    if w_bot_val > 0.05:
+        fig_2d.add_annotation(
+            x=geom["bot"][0][0] + w_bot_val/2, 
+            y=geom["bot"][0][1], 
+            text=f"{w_bot_val:.2f}m", 
+            showarrow=True, ay=20
+        )
+        
+    # Longueur Fond
+    # Pour le triangle c'est le point 2, pour rectangle le point 3 qui definit la hauteur Y
+    idx_l = 2 if shape_type == "Triangle Rectangle" else 3
+    l_bot_val = geom["bot"][idx_l][1] - geom["bot"][0][1]
+    
+    if l_bot_val > 0.05:
+        fig_2d.add_annotation(
+            x=geom["bot"][0][0], 
+            y=geom["bot"][0][1] + l_bot_val/2, 
+            text=f"{l_bot_val:.2f}m", 
+            showarrow=True, ax=-40
+        )
+        
+    # Indication visuelle du recul
+    if offset > 0.05:
+        fig_2d.add_annotation(
+            x=offset/2, y=offset/2, 
+            text=f"Recul {offset:.2f}m", 
+            font=dict(color="green", size=10), showarrow=False
+        )
 
     fig_2d.update_layout(
-        title="Vue de dessus",
+        title=f"Vue de dessus ({shape_type})",
         xaxis_title="X (m)", yaxis_title="Y (m)",
         yaxis=dict(scaleanchor="x", scaleratio=1),
         height=600
